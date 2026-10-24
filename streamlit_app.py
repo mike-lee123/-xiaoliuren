@@ -4,13 +4,23 @@
 部署：      推到 GitHub 後，在 https://share.streamlit.io 選此檔為 Main file
 """
 
+import base64
+import io
+import wave
 from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
 
+import numpy as np
 import streamlit as st
 from lunar_python import Solar
 
 # Streamlit Cloud 主機在 UTC，固定用台灣時間（UTC+8，無日光節約）
 TZ = timezone(timedelta(hours=8))
+
+# 放自己的素材即可替換：assets/bg.jpg（背景圖）、assets/bgm.mp3（背景音樂）
+ASSETS = Path(__file__).parent / "assets"
+BG_IMAGE = ASSETS / "bg.jpg"
+BGM_FILE = ASSETS / "bgm.mp3"
 
 EARTHLY_BRANCHES = ["子", "丑", "寅", "卯", "辰", "巳", "午", "未", "申", "酉", "戌", "亥"]
 BRANCH_HOURS = [
@@ -66,9 +76,94 @@ def to_lunar(dt: datetime):
     return lunar
 
 
+@st.cache_data
+def generate_bgm(seconds: int = 48, sr: int = 22050) -> bytes:
+    """以五聲音階（宮商角徵羽）合成一段可循環的古風氛圍音樂，回傳 WAV bytes。"""
+    rng = np.random.default_rng(8)
+    t_total = np.arange(seconds * sr) / sr
+    out = np.zeros_like(t_total)
+
+    # 低音持續音（宮 + 徵），緩慢起伏
+    swell = 0.6 + 0.4 * np.sin(2 * np.pi * t_total / seconds)
+    for f in (130.81, 196.00):
+        out += 0.08 * swell * np.sin(2 * np.pi * f * t_total)
+
+    # 撥弦旋律：C D E G A 兩個八度，指數衰減模擬古箏
+    scale = [261.63, 293.66, 329.63, 392.00, 440.00, 523.25, 587.33, 659.25]
+    beat = 0.75
+    note_len = int(3.0 * sr)
+    tn = np.arange(note_len) / sr
+    env = np.exp(-tn * 2.2) * np.minimum(tn / 0.01, 1)
+    idx = 2
+    for k in range(int(seconds / beat)):
+        if rng.random() < 0.35:  # 留白
+            continue
+        idx = int(np.clip(idx + rng.choice([-2, -1, 1, 2]), 0, len(scale) - 1))
+        f = scale[idx]
+        tone = np.sin(2 * np.pi * f * tn) + 0.3 * np.sin(4 * np.pi * f * tn)
+        start = int(k * beat * sr)
+        seg = (0.18 * env * tone)[: len(out) - start]
+        out[start:start + len(seg)] += seg
+
+    # 頭尾淡入淡出，循環時不突兀
+    fade = int(2 * sr)
+    out[:fade] *= np.linspace(0, 1, fade)
+    out[-fade:] *= np.linspace(1, 0, fade)
+    out = out / np.max(np.abs(out)) * 0.5
+
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(sr)
+        w.writeframes((out * 32767).astype(np.int16).tobytes())
+    return buf.getvalue()
+
+
+def apply_background():
+    if BG_IMAGE.exists():
+        b64 = base64.b64encode(BG_IMAGE.read_bytes()).decode()
+        bg = f'url("data:image/jpeg;base64,{b64}") center / cover fixed no-repeat'
+    else:
+        bg = (
+            "radial-gradient(circle at 20% 15%, rgba(255,215,140,.18) 0, transparent 35%),"
+            "radial-gradient(circle at 85% 80%, rgba(195,110,0,.22) 0, transparent 40%),"
+            "linear-gradient(160deg, #1a1033 0%, #2b1840 45%, #3d1f1f 100%) fixed"
+        )
+    st.markdown(
+        f"""
+<style>
+[data-testid="stAppViewContainer"] {{ background: {bg}; }}
+[data-testid="stHeader"] {{ background: transparent; }}
+[data-testid="stMainBlockContainer"] {{
+    background: rgba(255, 250, 240, .92);
+    border-radius: 16px;
+    padding: 2rem 2rem 1.5rem;
+    margin-top: 3rem;
+    margin-bottom: 3rem;
+    box-shadow: 0 8px 32px rgba(0, 0, 0, .35);
+    color: #2b1a0e;
+}}
+</style>
+""",
+        unsafe_allow_html=True,
+    )
+
+
 # ---------------- UI ----------------
 
 st.set_page_config(page_title="小六壬占卜", page_icon="🧙", layout="centered")
+apply_background()
+
+with st.sidebar:
+    st.subheader("🎵 背景音樂")
+    st.caption("瀏覽器不允許網頁自動發出聲音，請開啟開關或按播放鍵。")
+    if st.toggle("播放音樂", value=False):
+        if BGM_FILE.exists():
+            st.audio(str(BGM_FILE), format="audio/mpeg", loop=True, autoplay=True)
+        else:
+            st.audio(generate_bgm(), format="audio/wav", loop=True, autoplay=True)
+
 st.title("🧙 小六壬占卜")
 
 with st.expander("小六壬占卜教學"):
